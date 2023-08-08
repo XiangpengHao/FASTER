@@ -144,6 +144,10 @@ namespace FASTER.core
                 else
                 {
                     // Either on-disk or no record exists - create new record.
+                    if (hlog.IsNullDevice)
+                    {
+                        return OperationStatus.NOTFOUND;
+                    }
                     Debug.Assert(!fasterSession.IsManualLocking || LockTable.IsLockedExclusive(ref key, ref stackCtx.hei), "A Lockable-session Delete() of an on-disk or non-existent key requires a LockTable lock");
                     goto CreateNewRecord;
                 }
