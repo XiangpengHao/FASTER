@@ -131,7 +131,9 @@ namespace FASTER.core
 
                 // Note: we do not lock here; we wait until reading from disk, then lock in the InternalContinuePendingRead chain.
                 if (hlog.IsNullDevice)
-                    return OperationStatus.NOTFOUND;
+                    // This is a hack, we should create a new status instead.
+                    // when hlog is null device and logical address is larger than begin address, this page is being evicted, we should retry.
+                    return OperationStatus.CANCELED;
 
                 status = OperationStatus.RECORD_ON_DISK;
                 goto CreatePendingContext;

@@ -45,7 +45,7 @@ namespace FASTER.core
         /// </list>
         /// </returns>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        internal OperationStatus InternalRMW<Input, Output, Context, FasterSession>(ref Key key, ref Input input, ref Output output, ref Context userContext, 
+        internal OperationStatus InternalRMW<Input, Output, Context, FasterSession>(ref Key key, ref Input input, ref Output output, ref Context userContext,
                                     ref PendingContext<Input, Output, Context> pendingContext, FasterSession fasterSession, long lsn)
             where FasterSession : IFasterSession<Key, Value, Input, Output, Context>
         {
@@ -86,7 +86,7 @@ namespace FASTER.core
             try
             {
                 #region Address and source record checks
- 
+
                 if (stackCtx.recSrc.HasReadCacheSrc)
                 {
                     // Use the readcache record as the CopyUpdater source.
@@ -140,6 +140,11 @@ namespace FASTER.core
                 else if (stackCtx.recSrc.LogicalAddress >= hlog.BeginAddress)
                 {
                     // Disk Region: Need to issue async io requests. Locking will be checked on pending completion.
+                    if (hlog.IsNullDevice)
+                    {
+                        status = OperationStatus.CANCELED;
+                        goto LatchRelease;
+                    }
                     status = OperationStatus.RECORD_ON_DISK;
                     latchDestination = LatchDestination.CreatePendingContext;
                     goto CreatePendingContext;
@@ -443,7 +448,7 @@ namespace FASTER.core
                 {
                     doingCU = false;
                     forExpiration = true;
-                        
+
                     if (!ReinitializeExpiredRecord<Input, Output, Context, FasterSession>(ref key, ref input, ref newRecordValue, ref output, ref newRecordInfo,
                                             ref rmwInfo, newLogicalAddress, fasterSession, isIpu: false, out status))
                     {
