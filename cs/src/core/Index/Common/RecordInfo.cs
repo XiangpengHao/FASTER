@@ -205,7 +205,7 @@ namespace FASTER.core
                     if (expected_word == Interlocked.CompareExchange(ref word, expected_word + kSharedLockIncrement, expected_word))
                         return true;
                 }
-                if (spinCount > 0 && --spinCount <= 0) 
+                if (spinCount > 0 && --spinCount <= 0)
                     return false;
             }
         }

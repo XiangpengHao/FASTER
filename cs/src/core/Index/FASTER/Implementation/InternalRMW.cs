@@ -485,6 +485,8 @@ namespace FASTER.core
                 {
                     // Else it was a CopyUpdater so call PCU
                     fasterSession.PostCopyUpdater(ref key, ref input, ref value, ref hlog.GetValue(newPhysicalAddress), ref output, ref newRecordInfo, ref rmwInfo);
+
+                    srcRecordInfo.SetTombstone();
                     if (stackCtx.recSrc.ephemeralLockResult == EphemeralLockResult.HoldForSeal)
                         srcRecordInfo.UnlockExclusiveAndSeal();
                 }
