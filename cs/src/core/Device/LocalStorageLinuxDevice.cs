@@ -1,4 +1,4 @@
-﻿// Copyright (c) Microsoft Corporation. All rights reserved.
+// Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT license.
 
 using System;
@@ -14,8 +14,83 @@ namespace FASTER.core
     /// <summary>
     /// Managed device using .NET streams
     /// </summary>
-    public sealed class ManagedLocalStorageDevice : StorageDeviceBase
+    public sealed class ManagedLinuxStorageDevice : StorageDeviceBase
     {
+        public static int F_GETFL = 3;
+        public static int F_SETFL = 4;
+        public static int O_DIRECT = Convert.ToInt32("00040000", 8);
+        public static class Native
+        {
+            // TODO: C# 9, nuint instead of UIntPtr
+            /// <summary>
+            /// http://man7.org/linux/man-pages/man2/pwrite.2.html
+            /// </summary>
+            [DllImport("c", SetLastError = true)]
+            public static extern unsafe IntPtr pread(IntPtr fd, void* buf, UIntPtr count, IntPtr offset);
+
+
+            [DllImport("c", SetLastError = true)]
+            public static extern unsafe IntPtr fcntl(IntPtr fd, IntPtr cmd, IntPtr args);
+
+            /// <summary>
+			/// http://man7.org/linux/man-pages/man2/pwrite.2.html
+			/// </summary>
+			[DllImport("c", SetLastError = true)]
+            public static extern unsafe IntPtr pwrite(IntPtr fd, void* buf, UIntPtr count, IntPtr offset);
+        }
+
+        /// <summary>
+        /// Performs a <c>pread</c> on a filestream at an offset to a buffer.
+        /// </summary>
+        /// <param name="fileStream">The file to read from.</param>
+        /// <param name="buffer">The buffer to write data to.</param>
+        /// <param name="fileOffset">The offset in the file to read data from.</param>
+        /// <returns>Number of bytes.</returns>
+        // Pread -> PRead: inline with P.Read better, aligns with C# naming conventions better
+        // Span<byte>, FileStream, ulong -> FileStream, Span<byte>, ulong: aligns with P.Read better.
+        public static unsafe long PRead(FileStream fileStream, Span<byte> buffer, ulong fileOffset)
+        {
+            var fileDescriptor = fileStream.SafeFileHandle.DangerousGetHandle();
+
+            fixed (void* bufferPtr = buffer)
+            {
+                var bytesRead = (long)Native.pread(fileDescriptor, bufferPtr, (UIntPtr)buffer.Length, (IntPtr)fileOffset);
+                return bytesRead;
+            }
+        }
+
+        public static unsafe bool FileHandleSetODirect(FileStream fileStream)
+        {
+            var fileDescriptor = fileStream.SafeFileHandle.DangerousGetHandle();
+            var oldFlags = (int)Native.fcntl(fileDescriptor, (IntPtr)F_GETFL, (IntPtr)0);
+            var newFlags = oldFlags | O_DIRECT;
+            var ret = Native.fcntl(fileDescriptor, (IntPtr)F_SETFL, (IntPtr)newFlags);
+            var getnewFlags = (int)Native.fcntl(fileDescriptor, (IntPtr)F_GETFL, (IntPtr)0);
+            //Console.WriteLine("fd {0}, old flags {1}, new flags {2}", fileDescriptor, oldFlags, getnewFlags);
+            return (int)ret == 0;
+        }
+
+        /// <summary>
+        /// Performs a <c>pwrite</c> on a filestream at an offset to a buffer.
+        /// </summary>
+        /// <param name="fileStream">The file to write to.</param>
+        /// <param name="data">The data to write to the file.</param>
+        /// <param name="fileOffset">The offset in the file to write data at.</param>
+        /// <returns>A <see cref="PResult"/>.</returns>
+        // Pwrite -> PWrite: inline with P.Write better, aligns with C# naming conventions better
+        // ReadOnlySpan<byte>, FileStream, ulong -> FileStream, ReadOnlySpan<byte>, ulong: aligns with P.Write better.
+        // buffer -> data: better name, aligns with Windows.PWrite, was typo.
+        public static unsafe long PWrite(FileStream fileStream, ReadOnlySpan<byte> data, ulong fileOffset)
+        {
+            var fileDescriptor = fileStream.SafeFileHandle.DangerousGetHandle();
+
+            fixed (void* bufferPtr = data)
+            {
+                var bytesWritten = (long)Native.pwrite(fileDescriptor, bufferPtr, (UIntPtr)data.Length, (IntPtr)fileOffset);
+                return bytesWritten;
+            }
+        }
+
         private readonly bool preallocateFile;
         private readonly bool deleteOnClose;
         private readonly bool osReadBuffering;
@@ -38,7 +113,7 @@ namespace FASTER.core
         /// <param name="capacity">The maximal number of bytes this storage device can accommondate, or CAPACITY_UNSPECIFIED if there is no such limit</param>
         /// <param name="recoverDevice">Whether to recover device metadata from existing files</param>
         /// <param name="osReadBuffering">Enable OS read buffering</param>
-        public ManagedLocalStorageDevice(string filename, bool preallocateFile = false, bool deleteOnClose = false, long capacity = Devices.CAPACITY_UNSPECIFIED, bool recoverDevice = false, bool osReadBuffering = false)
+        public ManagedLinuxStorageDevice(string filename, bool preallocateFile = false, bool deleteOnClose = false, long capacity = Devices.CAPACITY_UNSPECIFIED, bool recoverDevice = false, bool osReadBuffering = false)
             : base(filename, GetSectorSize(filename), capacity)
         {
             pool = new(1, 1);
@@ -132,9 +207,9 @@ namespace FASTER.core
             Stream logReadHandle = null;
             AsyncPool<Stream> streampool = null;
             uint errorCode = 0;
-            Task<int> readTask = default;
+            //Task<int> readTask = default;
             bool gotHandle;
-            int numBytes = 0;
+            long numBytes = 0;
 
 #if NETSTANDARD2_1 || NET
             UnmanagedMemoryManager<byte> umm = default;
@@ -149,25 +224,14 @@ namespace FASTER.core
                 gotHandle = streampool.TryGet(out logReadHandle);
                 if (gotHandle)
                 {
-                    logReadHandle.Seek((long)sourceAddress, SeekOrigin.Begin);
+                    //logReadHandle.Seek((long)sourceAddress, SeekOrigin.Begin);
 #if NETSTANDARD2_1 || NET
                     unsafe
                     {
                         umm = new UnmanagedMemoryManager<byte>((byte*)destinationAddress, (int)readLength);
                     }
-
-                    // FileStream.ReadAsync is not thread-safe hence need a lock here
-                    // lock (this)
-                    // {
-                    readTask = logReadHandle.ReadAsync(umm.Memory).AsTask();
-                    // }
 #else
                     memory = pool.Get((int)readLength);
-                    // FileStream.ReadAsync is not thread-safe hence need a lock here
-                    // lock (this)
-                    // {
-                        readTask = logReadHandle.ReadAsync(memory.buffer, 0, (int)readLength);
-                    // }
 #endif
                 }
             }
@@ -193,7 +257,7 @@ namespace FASTER.core
                     try
                     {
                         logReadHandle = await streampool.GetAsync().ConfigureAwait(false);
-                        logReadHandle.Seek((long)sourceAddress, SeekOrigin.Begin);
+                        //logReadHandle.Seek((long)sourceAddress, SeekOrigin.Begin);
 #if NETSTANDARD2_1 || NET
                         unsafe
                         {
@@ -201,17 +265,17 @@ namespace FASTER.core
                         }
 
                         // FileStream.ReadAsync is not thread-safe hence need a lock here
-                        // lock (this)
-                        // {
-                        readTask = logReadHandle.ReadAsync(umm.Memory).AsTask();
-                        // }
+                        //lock (this)
+                        //{
+                        //    readTask = logReadHandle.ReadAsync(umm.Memory).AsTask();
+                        //}
 #else
                         memory = pool.Get((int)readLength);
                         // FileStream.ReadAsync is not thread-safe hence need a lock here
-                        // lock (this)
-                        // {
-                            readTask = logReadHandle.ReadAsync(memory.buffer, 0, (int)readLength);
-                        // }
+                        //lock (this)
+                        //{
+                        //    readTask = logReadHandle.ReadAsync(memory.buffer, 0, (int)readLength);
+                        //}
 #endif
                     }
                     catch
@@ -232,7 +296,13 @@ namespace FASTER.core
 
                 try
                 {
-                    numBytes = await readTask.ConfigureAwait(false);
+
+#if NETSTANDARD2_1 || NET
+                    numBytes = PRead((FileStream)logReadHandle, umm.Memory.Span, sourceAddress);
+#else
+                        numBytes = PRead((FileStream)logReadHandle, memory.buffer.AsSpan(), sourceAddress);
+#endif
+                    Debug.Assert(numBytes != -1);
 
 #if !(NETSTANDARD2_1 || NET)
                     unsafe
@@ -304,7 +374,7 @@ namespace FASTER.core
                 gotHandle = streampool.TryGet(out logWriteHandle);
                 if (gotHandle)
                 {
-                    logWriteHandle.Seek((long)destinationAddress, SeekOrigin.Begin);
+                    //logWriteHandle.Seek((long)destinationAddress, SeekOrigin.Begin);
 #if NETSTANDARD2_1 || NET
                     unsafe
                     {
@@ -312,10 +382,10 @@ namespace FASTER.core
                     }
 
                     // FileStream.WriteAsync is not thread-safe hence need a lock here
-                    // lock (this)
-                    {
-                        writeTask = logWriteHandle.WriteAsync(umm.Memory).AsTask();
-                    }
+                    //lock (this)
+                    //{
+                    //    writeTask = logWriteHandle.WriteAsync(umm.Memory).AsTask();
+                    //}
 #else
                     memory = pool.Get((int)numBytesToWrite);
                     unsafe
@@ -326,10 +396,10 @@ namespace FASTER.core
                         }
                     }
                     // FileStream.WriteAsync is not thread-safe hence need a lock here
-                    // lock (this)
-                    {
-                        writeTask = logWriteHandle.WriteAsync(memory.buffer, 0, (int)numBytesToWrite);
-                    }
+                    //lock (this)
+                    //{
+                    //    writeTask = logWriteHandle.WriteAsync(memory.buffer, 0, (int)numBytesToWrite);
+                    //}
 #endif
                 }
             }
@@ -355,7 +425,7 @@ namespace FASTER.core
                     try
                     {
                         logWriteHandle = await streampool.GetAsync().ConfigureAwait(false);
-                        logWriteHandle.Seek((long)destinationAddress, SeekOrigin.Begin);
+                        //logWriteHandle.Seek((long)destinationAddress, SeekOrigin.Begin);
 #if NETSTANDARD2_1 || NET
                         unsafe
                         {
@@ -363,10 +433,10 @@ namespace FASTER.core
                         }
 
                         // FileStream.WriteAsync is not thread-safe hence need a lock here
-                        // lock (this)
-                        {
-                            writeTask = logWriteHandle.WriteAsync(umm.Memory).AsTask();
-                        }
+                        //lock (this)
+                        //{
+                        //    writeTask = logWriteHandle.WriteAsync(umm.Memory).AsTask();
+                        //}
 #else
                         memory = pool.Get((int)numBytesToWrite);
                         unsafe
@@ -377,10 +447,10 @@ namespace FASTER.core
                             }
                         }
                         // FileStream.WriteAsync is not thread-safe hence need a lock here
-                        // lock (this)
-                        {
-                            writeTask = logWriteHandle.WriteAsync(memory.buffer, 0, (int)numBytesToWrite);
-                        }
+                        //lock (this)
+                        //{
+                        //    writeTask = logWriteHandle.WriteAsync(memory.buffer, 0, (int)numBytesToWrite);
+                        //}
 #endif
                     }
                     catch
@@ -401,7 +471,13 @@ namespace FASTER.core
 
                 try
                 {
-                    await writeTask.ConfigureAwait(false);
+                    //await writeTask.ConfigureAwait(false);
+#if NETSTANDARD2_1 || NET
+                    PWrite((FileStream)logWriteHandle, umm.Memory.Span, destinationAddress);
+#else
+                        PWrite((FileStream)logWriteHandle, memory.buffer.AsSpan(), destinationAddress);
+#endif
+                    //Debug.Assert(numBytesToWrite != -1);
                 }
                 catch (Exception ex)
                 {
@@ -514,16 +590,23 @@ namespace FASTER.core
         private Stream CreateReadHandle(int segmentId)
         {
             const int FILE_FLAG_NO_BUFFERING = 0x20000000;
-            FileOptions fo =
-                FileOptions.WriteThrough |
-                FileOptions.Asynchronous |
-                FileOptions.None;
-            if (!osReadBuffering)
-                fo |= (FileOptions)FILE_FLAG_NO_BUFFERING;
+            FileOptions fo = FileOptions.None;
+
 
             var logReadHandle = new FileStream(
                 GetSegmentName(segmentId), FileMode.OpenOrCreate,
                 FileAccess.Read, FileShare.ReadWrite, 512, fo);
+
+            if (!osReadBuffering)
+            {
+                var res = FileHandleSetODirect(logReadHandle);
+                if (res != true)
+                {
+                    //int error = Marshal.GetLastPInvokeError();
+                    //Console.WriteLine($"Last p/invoke error: {error}");
+                }
+                Debug.Assert(res);
+            }
 
             return logReadHandle;
         }
@@ -531,11 +614,7 @@ namespace FASTER.core
         private Stream CreateWriteHandle(int segmentId)
         {
             const int FILE_FLAG_NO_BUFFERING = 0x20000000;
-            FileOptions fo =
-                (FileOptions)FILE_FLAG_NO_BUFFERING |
-                FileOptions.WriteThrough |
-                FileOptions.Asynchronous |
-                FileOptions.None;
+            FileOptions fo = FileOptions.None;
 
             var logWriteHandle = new FileStream(
                 GetSegmentName(segmentId), FileMode.OpenOrCreate,
@@ -543,7 +622,16 @@ namespace FASTER.core
 
             if (preallocateFile && segmentSize != -1)
                 SetFileSize(logWriteHandle, segmentSize);
-
+            if (!osReadBuffering)
+            {
+                var res = FileHandleSetODirect(logWriteHandle);
+                if (res != true)
+                {
+                    //int error = Marshal.GetLastPInvokeError();
+                    //Console.WriteLine($"Last p/invoke error: {error}");
+                }
+                Debug.Assert(res);
+            }
             return logWriteHandle;
         }
 
